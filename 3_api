@@ -1,76 +1,112 @@
-    def execute_okx_trade(api_key, secret_key, passphrase, symbol, signals):
-        """
-        执行OKX交易
-        :param api_key: OKX API密钥
-        :param secret_key: OKX Secret密钥
-        :param passphrase: API密码
-        :param symbol: 交易对,如'BTC-USDT'
-        :param signals: 交易信号列表
-        """
+  import ccxt
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import time
+
+# 初始化OKX交易所API
+exchange = ccxt.okx({
+    'apiKey': '你的API Key',
+    'secret': '你的Secret Key',
+    'password': '你的API密码',
+    'enableRateLimit': True
+})
+
+def get_historical_data(symbol, timeframe, limit):
+    """获取历史K线数据"""
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+
+def get_realtime_data(symbol):
+    """获取实时行情数据"""
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        return {
+            'timestamp': pd.to_datetime(ticker['timestamp'], unit='ms'),
+            'price': ticker['last'],
+            'volume': ticker['baseVolume']
+        }
+    except Exception as e:
+        print(f"获取实时数据错误: {str(e)}")
+        return None
+
+def calculate_signals(df, realtime_data=None):
+    """计算交易信号，支持实时数据更新"""
+    if realtime_data:
+        # 添加实时数据到DataFrame
+        new_row = pd.DataFrame([{
+            'timestamp': realtime_data['timestamp'],
+            'close': realtime_data['price'],
+            'volume': realtime_data['volume']
+        }])
+        df = pd.concat([df.iloc[:-1], new_row]).reset_index(drop=True)
+    
+    # 计算指标
+    df['MA_fast'] = df['close'].rolling(window=10).mean()
+    df['MA_slow'] = df['close'].rolling(window=30).mean()
+    
+    # 生成交易信号
+    df['signal'] = 0
+    df.loc[df['MA_fast'] > df['MA_slow'], 'signal'] = 1  # 买入信号
+    df.loc[df['MA_fast'] < df['MA_slow'], 'signal'] = -1 # 卖出信号
+    
+    return df
+
+def execute_trades(symbol, signal):
+    """执行交易"""
+    try:
+        balance = exchange.fetch_balance()
+        position = exchange.fetch_positions([symbol])[0]
+        current_position = float(position['contracts'] or 0)
+        
+        if signal == 1 and current_position <= 0:  # 买入信号
+            exchange.create_market_buy_order(symbol, 1)
+            print(f"买入 {symbol}")
+            
+        elif signal == -1 and current_position >= 0:  # 卖出信号
+            exchange.create_market_sell_order(symbol, 1)
+            print(f"卖出 {symbol}")
+            
+    except Exception as e:
+        print(f"交易执行错误: {str(e)}")
+
+def main():
+    symbol = 'BTC/USDT'  # 交易对
+    timeframe = '1h'     # 时间周期
+    limit = 100         # 获取的K线数量
+    check_interval = 60  # 每分钟检查一次实时数据
+    
+    while True:
         try:
-            import ccxt
+            # 获取历史数据
+            df = get_historical_data(symbol, timeframe, limit)
             
-            # 初始化OKX交易所接口
-            exchange = ccxt.okx({
-                'apiKey': api_key,
-                'secret': secret_key,
-                'password': passphrase,
-                'enableRateLimit': True
-            })
+            # 获取实时数据
+            realtime_data = get_realtime_data(symbol)
             
-            print("成功连接到OKX交易所")
+            # 计算信号（包含实时数据）
+            if realtime_data:
+                df = calculate_signals(df, realtime_data)
+            else:
+                df = calculate_signals(df)
             
-            # 获取账户余额
-            balance = exchange.fetch_balance()
-            usdt_balance = balance['USDT']['free']
-            print(f'当前USDT余额: {usdt_balance}')
-            
-            # 获取当前市场价格
-            ticker = exchange.fetch_ticker(symbol)
-            current_price = ticker['last']
-            
-            # 设置每次交易额度（这里假设使用20%的USDT余额）
-            trade_amount = usdt_balance * 0.2 / current_price
+            # 获取最新信号
+            current_signal = df['signal'].iloc[-1]
             
             # 执行交易
-            for signal in signals:
-                if signal > 0:  # 买入信号
-                    try:
-                        order = exchange.create_market_buy_order(
-                            symbol,
-                            trade_amount
-                        )
-                        print(f"执行买入订单: {order}")
-                    except Exception as e:
-                        print(f"买入订单执行失败: {str(e)}")
-                        
-                elif signal < 0:  # 卖出信号
-                    try:
-                        order = exchange.create_market_sell_order(
-                            symbol,
-                            trade_amount
-                        )
-                        print(f"执行卖出订单: {order}")
-                    except Exception as e:
-                        print(f"卖出订单执行失败: {str(e)}")
-                        
-                # 等待一段时间避免触发频率限制
-                import time
-                time.sleep(1)
-                
+            execute_trades(symbol, current_signal)
+            
+            print(f"当前时间: {datetime.now()}")
+            print(f"当前价格: {realtime_data['price'] if realtime_data else 'N/A'}")
+            print(f"交易信号: {current_signal}")
+            
+            time.sleep(check_interval)
+            
         except Exception as e:
-            print(f"交易执行过程中出现错误: {str(e)}")
+            print(f"运行错误: {str(e)}")
+            time.sleep(60)
 
-    # 使用示例
-    if __name__ == "__main__":
-        # 设置您的API密钥（请替换为实际的密钥）
-        api_key = "your_api_key"
-        secret_key = "your_secret_key"
-        passphrase = "your_passphrase"
-        symbol = "BTC-USDT"
-        
-        # 运行主程序获取交易信号
-        main()
-        
-        # 执行实际交易
-        execute_okx_trade(api_key, secret_key, passphrase, symbol, signals)
+if __name__ == "__main__":
+    main()
